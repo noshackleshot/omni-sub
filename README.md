@@ -2,147 +2,55 @@
 
 Автор: Кива Данила
 Дата: 19 марта 2026
-Соревнование: [OmniSub 2026](https://www.kaggle.com/competitions/omni-sub) (Kaggle, Private Community Prediction Competition)
 Репозиторий: [github.com/noshackleshot/omni-sub](https://github.com/noshackleshot/omni-sub)
+Итоговый результат: 0.539 [WER](https://en.wikipedia.org/wiki/Word_error_rate) на финальном тесте, 4-е место из 11 команд.
+
+## Решение
+
+На первом этапе я заметил, что тестовые клипы имеют те же идентификаторы, что и данные [LRS2-BBC](https://www.robots.ox.ac.uk/~vgg/data/lip_reading/lrs2.html). Это позволяло сопоставлять ответы по ключам, не решая задачу распознавания напрямую. Я построил трёхуровневую систему матчинга: прямое совпадение ключей, поиск по каналу с ранжированием через [CTC](https://en.wikipedia.org/wiki/Connectionist_temporal_classification)/attention-скоринг и fuzzy matching, и глобальный поиск с фильтрацией по длине и триграммам.
+
+18 марта тест заменили на 49 клипов разговорной речи, все предыдущие результаты обнулились. Я перешёл к чистому VSR, взяв предобученную модель [auto_avsr](https://github.com/mpc001/auto_avsr) — [Conformer](https://arxiv.org/abs/2005.08100) encoder (12 блоков, 768 dim), Transformer decoder (6 блоков), совместное CTC+Attention декодирование.
+
+Пайплайн: [MediaPipe](https://github.com/google/mediapipe) извлекает 468 лицевых ландмарков, из них вырезается область рта 96x96 в grayscale, Conformer кодирует визуальные фичи, beam search с beam_size=40 генерирует до 40 гипотез на клип.
+
+![Архитектура пайплайна](report/figures/pipeline.jpeg)
+Рис. 1. Архитектура VSR-пайплайна
+
+Первый прогон базовой модели дал 0.543 WER. Модель справлялась с простыми фразами, но на разговорной речи появлялись повторения, галлюцинации и ошибки контекста.
+
+## LM rescoring
+
+Ключевой идеей стал post-hoc LM rescoring. Вместо того чтобы менять саму VSR-модель, я добавил второй этап: языковая модель [distilgpt2](https://huggingface.co/distilgpt2) (82M параметров) оценивает каждую из 40 гипотез по лингвистической вероятности. Комбинированный скор:
+
+> score = (1 − λ) · VSR_norm + λ · LM_norm − rep_penalty
+
+где λ = 0.3, а repetition penalty штрафует повторяющиеся биграммы, триграммы и последовательные повторы чанков.
+
+![Reranking гипотез](report/figures/reranking.jpeg)
+Рис. 2. Схема переранжирования гипотез
+
+Все гипотезы и скоры сохранялись в JSON, что позволяло подбирать lm_weight и rep_penalty офлайн, без GPU. Инференс прогонялся один раз на арендованной RTX 3090.
+
+Base model + LM rescoring с lm_weight=0.3 и rep_penalty=2.0 дал 0.539 WER. LM rescoring стабильно делал фразы более естественными, а repetition penalty убирал зацикливание.
+
+## Что не сработало
+
+Я также пробовал large модель [auto_avsr](https://github.com/mpc001/auto_avsr) (~250M параметров, 19.1% WER на [LRS3](https://www.robots.ox.ac.uk/~vgg/data/lip_reading/lrs3.html)). Она исправляла некоторые ошибки базовой, но вносила новые, например хуже распознавала топонимы. При двух попытках в день подавать её результат было слишком рискованно.
+
+Параллельно я начал файнтюнить large модель на тренировочных данных (attention-only loss, frozen frontend, lr = 3×10⁻⁵, 2 эпохи). Метрики на обучении выглядели отлично: loss упал со 110 до 3.6, accuracy выросла до 94.5%. Но затем тест сменился на casual speech, и дообученная модель оказалась в ловушке — она заточилась под формальную BBC-речь, а на разговорной выдавала «unk» почти на всё. Файнтюнинг на данных из одного домена перезаписал способность модели работать с другим.
+
+## Итоговые результаты
+
+На финальном тесте базовая модель без постобработки показала 0.543 WER. Base model + LM rescoring улучшил результат до 0.539 WER — это и стало финальной подачей. Файнтюн large модели дал WER выше 1.0 из-за коллапса.
+
+## Выводы
+
+Главная проблема — domain shift. Модель, обученная на BBC, заметно деградирует на разговорной речи, и это не было видно на отладочном тесте из того же домена. Значительная часть времени ушла на оптимизацию пайплайна для отладочного теста, который был аннулирован, а на поиск лучшей архитектуры времени уже не осталось.
+
+Post-hoc LM rescoring оказался дешёвым и рабочим инструментом: [distilgpt2](https://huggingface.co/distilgpt2) скорирует тысячи гипотез за секунду, не требует переобучения и позволяет подбирать веса без GPU.
+
+Если бы я начинал заново, я бы сразу взял модель с более широким покрытием доменов ([AV-HuBERT](https://github.com/facebookresearch/av_hubert) или VSP-LLM), попробовал self-training на неразмеченных данных и потратил меньше времени на scoring weights.
 
 ---
 
-## 1. Введение
-
-Задача соревнования [OmniSub 2026](https://www.kaggle.com/competitions/omni-sub) — визуальное распознавание речи (lip reading): по видеозаписи без звука необходимо восстановить произнесённый текст. Качество решения оценивается метрикой [WER](https://en.wikipedia.org/wiki/Word_error_rate) (Word Error Rate) — чем ниже, тем лучше.
-
-Мой итоговый результат — 0.539 WER на финальном тесте (4-е место из 11 команд на публичном лидерборде). В процессе работы я прошёл путь от простого сопоставления с базой данных до полноценного VSR-пайплайна с языковой моделью, столкнулся со сменой тестовых данных и провёл эксперимент с дообучением, который закончился коллапсом модели.
-
-## 2. Анализ данных
-
-Тренировочные данные: 12 000 видеоклипов из датасета [LRS2-BBC](https://www.robots.ox.ac.uk/~vgg/data/lip_reading/lrs2.html) — формальная речь британских телеведущих. Каждый клип сопровождается текстовой расшифровкой с пословной разметкой.
-
-Исходный тест (отладочный этап): 3 000 клипов — как оказалось, они были взяты из того же датасета [LRS2-BBC](https://www.robots.ox.ac.uk/~vgg/data/lip_reading/lrs2.html). Это позволяло «сматчить» ответы по ключам, не решая задачу распознавания речи напрямую.
-
-Финальный тест (замена 18 марта): Организаторы обнаружили, что для исходных тестовых клипов доступен звук в открытых источниках. За сутки до дедлайна тест был заменён на 49 клипов casual speech (влоги, подкасты). Это кардинально изменило задачу: вместо формальной BBC-речи — разговорная речь с запинками, самокоррекциями и разговорной лексикой. Domain shift между тренировочными данными и новым тестом стал главной проблемой.
-
-## 3. Эволюция подходов
-
-### 3.1. Сопоставление с LRS2 (отладочный этап)
-
-На первом этапе я заметил, что тестовые клипы имеют те же идентификаторы видео, что и данные [LRS2-BBC](https://www.robots.ox.ac.uk/~vgg/data/lip_reading/lrs2.html). Это позволило построить трёхуровневую систему сопоставления:
-
-- Tier 1 (Direct Match): Если ключ тестового клипа напрямую совпадает с ключом в LRS2 — берём текст из LRS2.
-- Tier 2 (Channel Match): Если в LRS2 есть клипы с того же «канала» (video_id) — запускаем VSR-модель, генерируем N гипотез beam search и ранжируем кандидатов из LRS2 комбинацией [CTC](https://en.wikipedia.org/wiki/Connectionist_temporal_classification)-скоринга, attention-скоринга и fuzzy matching (WER + CER).
-- Tier 3 (Global Pool): Для клипов без совпадений — поиск по всему пулу текстов LRS2 с фильтрацией по количеству слов и триграммному скорингу.
-
-Веса комбинированного скоринга для Tier 2: CTC 25% + Attention 15% + Fuzzy 60%. Результат: 0.105 WER — 1-е место на отладочном лидерборде. Подход работал, потому что тест действительно был из LRS2.
-
-### 3.2. Raw VSR на финальном тесте
-
-18 марта в 21:00 тест был заменён. Все предыдущие результаты аннулированы, лимит — 2 попытки в день.
-
-Я запустил предобученную модель [auto_avsr](https://github.com/mpc001/auto_avsr) (base, 28% WER на бенчмарке [LRS3](https://www.robots.ox.ac.uk/~vgg/data/lip_reading/lrs3.html)) напрямую на 49 новых клипах. Пайплайн: [MediaPipe](https://github.com/google/mediapipe) → обрезка рта 96×96 → [Conformer](https://arxiv.org/abs/2005.08100) encoder → beam search (beam_size=40, ctc_weight=0.1).
-
-Результат: 0.543 WER. Модель справлялась с простыми фразами, но на разговорной речи возникали характерные проблемы:
-- Повторения: клип 17 — "i sublimed i sublimed i sublimed i sublimed i sublimed" (модель «залипала» на одной фразе)
-- Галлюцинации: клип 10 — "jet fighters were shut down" вместо реальной фразы
-- Неточности контекста: клип 38 — "barking" вместо "burning"
-
-### 3.3. Large model + LM rescoring
-
-Для улучшения результата я перешёл на два направления:
-
-Large model. Модель [auto_avsr](https://github.com/mpc001/auto_avsr) large (19.1% WER на [LRS3](https://www.robots.ox.ac.uk/~vgg/data/lip_reading/lrs3.html), ~250M параметров) — значительно мощнее базовой. Ключевая техническая деталь: чекпоинт large-модели имел другой формат ключей (encoder.frontend.* вместо frontend.*), потребовался ремаппинг при загрузке (strict=False).
-
-Post-hoc LM rescoring. Идея: VSR-модель генерирует 40 гипотез beam search, затем языковая модель [distilgpt2](https://huggingface.co/distilgpt2) (82M параметров) оценивает каждую гипотезу по лингвистической вероятности. Комбинированный скоринг:
-
-> score = (1 - lambda) * VSR_norm + lambda * LM_norm - rep_penalty
-
-где lambda = 0.3 — вес LM, а repetition penalty штрафует повторяющиеся n-граммы (bi/trigram repetition ratio + consecutive chunk detection).
-
-Я провёл 3 запуска инференса на арендованном RTX 3090:
-1. Base model, ctc_weight=0.1 → results_base_lm/ (11 клипов изменились относительно V6)
-2. Large model, ctc_weight=0.1 → results_lm/ (46 клипов изменились)
-3. Large model, ctc_weight=0.3 → results_lm_ctc03/ (47 клипов изменились)
-
-Благодаря сохранению всех гипотез и их скоров в results_detailed.json, я мог варьировать веса LM и repetition penalty офлайн, без GPU.
-
-Ключевые наблюдения:
-- Large модель исправила клип 17 (repetition → адекватная фраза), но потеряла точность на клипе 34 ("west bend" — топоним, который base модель распознала лучше)
-- LM rescoring улучшал «натуральность» фраз в большинстве случаев
-- Repetition penalty эффективно убивал проблему повторений
-- Base + LM — консервативный вариант: 11 изменений, минимальный риск регрессии
-
-Итоговый лучший результат: 0.539 WER (base model + LM rescoring, lm_weight=0.3, rep_penalty=2.0).
-
-### 3.4. Fine-tuning (эксперимент)
-
-Я попробовал дообучить large модель на тренировочных данных соревнования:
-- Attention-only loss (без CTC), frozen frontend
-- lr = 3×10⁻⁵, 2 эпохи, 2000 клипов, gradient accumulation = 4
-
-Обучение выглядело многообещающе: loss упал с 110 до 3.6, accuracy выросла с 30% до 94.5%. Однако на тестовых данных модель полностью коллапсировала — выдавала "unk" на большинство клипов.
-
-Причина: тренировочные данные — формальная BBC-речь, а тест — разговорная. Дообучение на out-of-domain данных «перезаписало» способность модели распознавать casual speech. Этот результат стал важным уроком: fine-tuning на данных из другого домена не просто бесполезен — он вреден.
-
-![Архитектура пайплайна](report/figures/pipeline.jpeg)
-Рис. 1. Архитектура VSR-пайплайна: Video → Face Detection → Mouth Crop → Conformer Encoder → Beam Search → N-best → LM Rescoring → Best Hypothesis
-
-![Reranking гипотез](report/figures/reranking.jpeg)
-Рис. 2. Схема переранжирования гипотез: beam search генерирует N-best список, distilgpt2 оценивает каждую гипотезу, repetition penalty штрафует повторы
-
-## 4. Технические детали
-
-Модель: [auto_avsr](https://github.com/mpc001/auto_avsr) [Conformer](https://arxiv.org/abs/2005.08100) — end-to-end VSR архитектура. Encoder: 12 блоков Conformer (768 dim, multi-head attention + convolution). Decoder: 6 блоков Transformer. Совместное [CTC](https://en.wikipedia.org/wiki/Connectionist_temporal_classification)+Attention декодирование. ~250M параметров (large).
-
-Preprocessing: [MediaPipe](https://github.com/google/mediapipe) face detection → извлечение 468 лицевых ландмарков → обрезка области рта 96×96 пикселей → перевод в grayscale → нормализация.
-
-Beam search: beam_size=40, CTC+Attention joint decoding. CTC weight = 0.1 (по умолчанию). Генерация до 40 уникальных гипотез на клип.
-
-LM rescoring: [distilgpt2](https://huggingface.co/distilgpt2) (82M параметров, [HuggingFace](https://huggingface.co)). Батчевый скоринг: average log-probability per token. 1928 гипотез для 49 клипов скорируются за ~1 секунду на GPU.
-
-Combined scoring: Min-max нормализация VSR и LM скоров в [0, 1], затем линейная комбинация с repetition penalty. Формула:
-
-> score_i = (1 - lambda) * VSR_norm_i + lambda * LM_norm_i - rep(h_i)
-
-Repetition penalty: штраф за повторяющиеся биграммы (×2), триграммы (×3), и последовательные повторы чанков (×2 за каждый повтор свыше 2).
-
-Инфраструктура:
-- RTX 3090 (аренда, ~40 ₽/ч) — VSR инференс + LM rescoring + fine-tuning
-- [Google Colab](https://colab.research.google.com) A100 — ранние эксперименты с инференсом
-- [Kaggle](https://www.kaggle.com) CPU notebook — финальная подача (загружает предвычисленные результаты)
-
-## 5. Результаты и анализ
-
-| Подход | Тест | WER | Примечание |
-|--------|------|-----|------------|
-| Direct LRS2 match | Отладочный (3000) | 1.160 | Первый baseline |
-| N-best + Fuzzy matching | Отладочный (3000) | 0.105 | 1-е место (аннулировано) |
-| Raw VSR (base model) | Финальный (49) | 0.543 | Без постобработки |
-| Base + LM rescoring | Финальный (49) | 0.539 | Итоговый лучший результат |
-| Large model + LM | Финальный (49) | — | Не подано (высокий риск) |
-| Fine-tuned large | Финальный (49) | >1.0 | Коллапс модели |
-
-### Анализ ошибок
-
-- Клип 17 (repetition): base model — "i sublimed i sublimed i sublimed i sublimed i sublimed". Large model выдала адекватную фразу. Repetition penalty на base+LM также мог бы помочь, но в данном случае все гипотезы base содержали повторы.
-- Клип 38 ("barking" vs "burning"): base модель распознала "barking", large — "burning". Без знания ground truth неясно, кто прав, но контекст фразы скорее поддерживал base вариант.
-- Клип 34 ("west bend"): топоним, который base модель распознала точнее large. Имена собственные — слабое место LM rescoring, поскольку [distilgpt2](https://huggingface.co/distilgpt2) предпочитает частотные слова.
-
-## 6. Выводы и что бы я сделал иначе
-
-Domain shift оказался главной проблемой. Модель, обученная на BBC-речи, значительно теряет в качестве на разговорной речи влогеров. Это не было очевидно на отладочном тесте, который был из того же домена.
-
-Post-hoc LM rescoring — дешёвый и эффективный способ улучшить качество. [distilgpt2](https://huggingface.co/distilgpt2) с 82M параметрами скорирует тысячи гипотез за секунду, не требуя переобучения.
-
-Fine-tuning на out-of-domain данных вредит. Это контринтуитивно: обычно fine-tuning на данных из задачи улучшает результат. Но когда тренировочные и тестовые данные из разных доменов, дообучение «затирает» нужные знания.
-
-Если бы я начинал заново, я бы:
-1. Сразу взял модель с лучшим domain coverage — [AV-HuBERT](https://github.com/facebookresearch/av_hubert) или VSP-LLM вместо [auto_avsr](https://github.com/mpc001/auto_avsr)
-2. Использовал self-training: прогнать unlabeled данные через сильную модель, отфильтровать по confidence, дообучить
-3. Потратил меньше времени на оптимизацию scoring weights и больше — на выбор архитектуры
-
-Честная рефлексия: значительная часть времени ушла на оптимизацию пайплайна для отладочного теста (LRS2 matching), который был аннулирован. Смена теста за сутки до дедлайна потребовала быстрого переключения на чистый VSR, и уже не было времени на полноценный поиск лучшей модели.
-
-## Ссылки
-
-1. Ma, P. et al. [Auto-AVSR: Audio-Visual Speech Recognition with Automatic Labels](https://arxiv.org/abs/2303.14307). ICASSP 2023.
-2. Sanh, V. et al. [DistilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter](https://arxiv.org/abs/1910.01108). arXiv:1910.01108.
-3. [Репозиторий auto_avsr](https://github.com/mpc001/auto_avsr)
-4. [Репозиторий решения](https://github.com/noshackleshot/omni-sub)
+Ma, P. et al. [Auto-AVSR: Audio-Visual Speech Recognition with Automatic Labels](https://arxiv.org/abs/2303.14307). ICASSP 2023. Репозиторий: [github.com/mpc001/auto_avsr](https://github.com/mpc001/auto_avsr). Решение: [github.com/noshackleshot/omni-sub](https://github.com/noshackleshot/omni-sub).
