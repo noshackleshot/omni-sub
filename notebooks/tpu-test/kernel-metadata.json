@@ -1,0 +1,14 @@
+{
+  "id": "kivadanila/omnisub-tpu-test",
+  "title": "OmniSub TPU Test",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "competition_sources": [],
+  "dataset_sources": ["kivadanila/auto-avsr-vsr-model"],
+  "keywords": []
+}

@@ -1,0 +1,13 @@
+{
+  "id": "kivadanila/omnisub-direct-match",
+  "title": "omnisub-direct-match",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": false,
+  "dataset_sources": ["kivadanila/lrs2-texts"],
+  "competition_sources": ["omni-sub"],
+  "kernel_sources": []
+}

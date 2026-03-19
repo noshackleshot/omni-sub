@@ -1,0 +1,37 @@
+# Data & models
+*.pth
+*.pt
+*.onnx
+test/
+train/
+datasets/
+omni-sub.zip
+data/
+
+# Credentials
+creds.txt
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large results (keep only final)
+model_large_extracted/
+LRS3_V_WER19.1/
+kaggle_upload/
+test_sample/
+
+# Claude
+.claude/
