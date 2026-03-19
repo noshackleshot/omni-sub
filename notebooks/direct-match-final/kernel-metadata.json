@@ -1,0 +1,13 @@
+{
+  "id": "kivadanila/omnisub-direct-match",
+  "title": "OmniSub Direct Match Final",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": false,
+  "competition_sources": ["omni-sub"],
+  "dataset_sources": ["kivadanila/lrs2-texts", "kivadanila/auto-avsr-vsr-model", "kivadanila/omnisub-precomputed-results"],
+  "keywords": []
+}
